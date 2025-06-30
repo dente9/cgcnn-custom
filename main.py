@@ -13,15 +13,19 @@ import torch.optim as optim
 from sklearn import metrics
 from torch.autograd import Variable
 from torch.optim.lr_scheduler import MultiStepLR
-
+from torch.utils.data import DataLoader  
 from cgcnn.data import CIFData
 from cgcnn.data import collate_pool, get_train_val_test_loader
 from cgcnn.model import CrystalGraphConvNet
 
+
+from pymatgen.core.structure import Structure
+# 忽略 Pymatgen 的特定警告
+warnings.filterwarnings("ignore", category=UserWarning, module="pymatgen")
+
 parser = argparse.ArgumentParser(description='Crystal Graph Convolutional Neural Networks')
-parser.add_argument('data_options', metavar='OPTIONS', nargs='+',
-                    help='dataset options, started with the path to root dir, '
-                         'then other options')
+parser.add_argument('--data-dir', type=str, required=True,
+                    help='Path to root directory containing train/val/test subdirectories')
 parser.add_argument('--task', choices=['regression', 'classification'],
                     default='regression', help='complete a regression or '
                                                    'classification task (default: regression)')
@@ -92,36 +96,40 @@ def main():
     global args, best_mae_error
 
     # load data
-    dataset = CIFData(*args.data_options)
+  #  dataset = CIFData(*args.data_options)
+  
     collate_fn = collate_pool
-    train_loader, val_loader, test_loader = get_train_val_test_loader(
-        dataset=dataset,
-        collate_fn=collate_fn,
-        batch_size=args.batch_size,
-        train_ratio=args.train_ratio,
-        num_workers=args.workers,
-        val_ratio=args.val_ratio,
-        test_ratio=args.test_ratio,
-        pin_memory=args.cuda,
-        return_test=True)
+    train_dataset = CIFData(os.path.join(args.data_dir, "train"))
+    val_dataset = CIFData(os.path.join(args.data_dir, "val"))
+    test_dataset = CIFData(os.path.join(args.data_dir, "test"))
+
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, 
+                            shuffle=True, num_workers=args.workers,
+                            collate_fn=collate_fn, pin_memory=args.cuda)
+
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, 
+                        shuffle=False, num_workers=args.workers,
+                        collate_fn=collate_fn, pin_memory=args.cuda)
+
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, 
+                            shuffle=False, num_workers=args.workers,
+                            collate_fn=collate_fn, pin_memory=args.cuda)
 
     # obtain target value normalizer
     if args.task == 'classification':
         normalizer = Normalizer(torch.zeros(2))
         normalizer.load_state_dict({'mean': 0., 'std': 1.})
     else:
-        if len(dataset) < 500:
-            warnings.warn('Dataset has less than 500 data points. '
-                          'Lower accuracy is expected. ')
-            sample_data_list = [dataset[i] for i in range(len(dataset))]
+        if len(train_dataset) < 500:
+            sample_data_list = [train_dataset[i] for i in range(len(train_dataset))]
         else:
-            sample_data_list = [dataset[i] for i in
-                                sample(range(len(dataset)), 500)]
+            sample_data_list = [train_dataset[i] for i in sample(range(len(train_dataset)), 500)]
+
         _, sample_target, _ = collate_pool(sample_data_list)
         normalizer = Normalizer(sample_target)
 
     # build model
-    structures, _, _ = dataset[0]
+    structures, _, _ = train_dataset[0]
     orig_atom_fea_len = structures[0].shape[-1]
     nbr_fea_len = structures[1].shape[-1]
     model = CrystalGraphConvNet(orig_atom_fea_len, nbr_fea_len,
