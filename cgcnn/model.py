@@ -2,6 +2,7 @@ from __future__ import print_function, division
 
 import torch
 import torch.nn as nn
+import math
 
 
 class ConvLayer(nn.Module):
@@ -57,7 +58,6 @@ class ConvLayer(nn.Module):
           Atom hidden features after convolution
 
         """
-        # TODO will there be problems with the index zero padding?
         N, M = nbr_fea_idx.shape
         # convolution
         atom_nbr_fea = atom_in_fea[nbr_fea_idx, :]
@@ -114,8 +114,17 @@ class CrystalGraphConvNet(nn.Module):
         self.convs = nn.ModuleList([ConvLayer(atom_fea_len=atom_fea_len,
                                     nbr_fea_len=nbr_fea_len)
                                     for _ in range(n_conv)])
-        self.conv_to_fc = nn.Linear(atom_fea_len, h_fea_len)
+        
+        # 关键修改1: 池化后的特征维度变为原来的3倍
+        self.pooled_fea_len = 3 * atom_fea_len
+        
+        # 关键修改2: 调整全连接层的输入维度
+        self.conv_to_fc = nn.Linear(self.pooled_fea_len, h_fea_len)
         self.conv_to_fc_softplus = nn.Softplus()
+        
+        # 新增归一化层
+        self.pool_bn = nn.BatchNorm1d(self.pooled_fea_len)
+        
         if n_h > 1:
             self.fcs = nn.ModuleList([nn.Linear(h_fea_len, h_fea_len)
                                       for _ in range(n_h-1)])
@@ -127,7 +136,7 @@ class CrystalGraphConvNet(nn.Module):
             self.fc_out = nn.Linear(h_fea_len, 1)
         if self.classification:
             self.logsoftmax = nn.LogSoftmax(dim=1)
-            self.dropout = nn.Dropout()
+            self.dropout = nn.Dropout(p=0.3)  # 增加dropout比例减少过拟合
 
     def forward(self, atom_fea, nbr_fea, nbr_fea_idx, crystal_atom_idx):
         """
@@ -159,9 +168,16 @@ class CrystalGraphConvNet(nn.Module):
         atom_fea = self.embedding(atom_fea)
         for conv_func in self.convs:
             atom_fea = conv_func(atom_fea, nbr_fea, nbr_fea_idx)
+            
+        # 使用组合池化
         crys_fea = self.pooling(atom_fea, crystal_atom_idx)
-        crys_fea = self.conv_to_fc(self.conv_to_fc_softplus(crys_fea))
-        crys_fea = self.conv_to_fc_softplus(crys_fea)
+        
+        # 关键修改3: 添加批归一化层
+        crys_fea = self.pool_bn(crys_fea)
+        
+        # 关键修改4: 调整全连接层的处理
+        crys_fea = self.conv_to_fc_softplus(self.conv_to_fc(crys_fea))
+        
         if self.classification:
             crys_fea = self.dropout(crys_fea)
         if hasattr(self, 'fcs') and hasattr(self, 'softpluses'):
@@ -174,8 +190,8 @@ class CrystalGraphConvNet(nn.Module):
 
     def pooling(self, atom_fea, crystal_atom_idx):
         """
-        Pooling the atom features to crystal features
-
+        组合池化: 平均 + 最大 + 求和（归一化）
+        
         N: Total number of atoms in the batch
         N0: Total number of crystals in the batch
 
@@ -187,8 +203,25 @@ class CrystalGraphConvNet(nn.Module):
         crystal_atom_idx: list of torch.LongTensor of length N0
           Mapping from the crystal idx to atom idx
         """
-        assert sum([len(idx_map) for idx_map in crystal_atom_idx]) ==\
-            atom_fea.data.shape[0]
-        summed_fea = [torch.mean(atom_fea[idx_map], dim=0, keepdim=True)
-                      for idx_map in crystal_atom_idx]
-        return torch.cat(summed_fea, dim=0)
+        assert sum([len(idx_map) for idx_map in crystal_atom_idx]) == atom_fea.data.shape[0]
+            
+        features = []
+        for idx_map in crystal_atom_idx:
+            selected = atom_fea[idx_map]
+            num_atoms = selected.size(0)  # 当前晶体的原子数量
+            
+            # 计算三种统计特征
+            mean_feature = torch.mean(selected, dim=0)     # 平均特征
+            max_feature, _ = torch.max(selected, dim=0)    # 最大特征
+            sum_feature = torch.sum(selected, dim=0)       # 求和特征
+            
+            # 关键修改5: 对求和特征进行归一化
+            # 使用对数归一化：log(1 + sum_feature/num_atoms)
+            # 这能有效减少大晶体带来的尺度问题
+            sum_feature = torch.log(1 + torch.abs(sum_feature) / math.sqrt(num_atoms))
+            
+            # 拼接三种特征
+            combined_feature = torch.cat([0.2*mean_feature, 0.1*max_feature, 0.7*sum_feature])
+            features.append(combined_feature.unsqueeze(0))
+            
+        return torch.cat(features, dim=0)

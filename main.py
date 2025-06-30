@@ -94,11 +94,9 @@ else:
 
 def main():
     global args, best_mae_error
-
-    # load data
-  #  dataset = CIFData(*args.data_options)
-  
+    
     collate_fn = collate_pool
+
     train_dataset = CIFData(os.path.join(args.data_dir, "train"))
     val_dataset = CIFData(os.path.join(args.data_dir, "val"))
     test_dataset = CIFData(os.path.join(args.data_dir, "test"))
